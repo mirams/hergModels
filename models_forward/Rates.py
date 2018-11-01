@@ -31,70 +31,170 @@ class ratesPrior(object):
 
         self.vmin = -120
         self.vmax =  60
+        n = 1e3
+        a=np.exp(np.linspace(np.log(self.lower_alpha), np.log(self.upper_alpha), n))
+        f_bmin = (1 / self.vmax) * (np.log(self.rmin) - np.log(a))
+        f_bmax = (1 / self.vmax) * (np.log(self.rmax) - np.log(a))
+        self.f_bmin = np.maximum(f_bmin, self.lower_beta)
+        self.f_bmax = np.minimum(f_bmax, self.upper_beta)
+        
 
-    def check_rates(self, rates_dict):
+        r_bmin = (-1 / self.vmin) * (np.log(self.rmin) - np.log(a))
+        r_bmax = (-1 / self.vmin) * (np.log(self.rmax) - np.log(a))
+        self.r_bmin = np.maximum(r_bmin, self.lower_beta)
+        self.r_bmax = np.minimum(r_bmax, self.upper_beta) 
+        #self.r_bmax[0] =  self.upper_beta
 
-        debug = False
+    def _get_boundaries(self, transform, rates_dict):
+        b_low = []#np.zeros(2*len(rates_dict)+1)
+        b_up = []
+        for _, rate in rates_dict.iteritems():
+            # Sample forward rates
+            if transform == 'loglinear':
+
+                if rate[2] == 'vol_ind':
+                    b_low.append(np.log(self.lower_alpha))
+                    b_up.append(np.log(self.upper_alpha))
+                elif rate[2] == 'positive': 
+                    b_low.append(np.log(self.lower_alpha))
+                    b_low.append(self.lower_beta)
+                    b_up.append(np.log(self.upper_alpha))
+                    b_up.append(self.f_bmax[0])
+                elif rate[2] == 'negative':
+                    b_low.append(np.log(self.lower_alpha))
+                    b_low.append(self.lower_beta)
+                    b_up.append(np.log(self.upper_alpha))
+                    b_up.append(self.r_bmax[0])
+
+            elif transform == 'loglog':
+                
+                if rate[2] == 'vol_ind':
+                    b_low.append(np.log(self.lower_alpha))
+                    b_up.append(np.log(self.upper_alpha))
+                
+                elif rate[2] == 'positive': 
+                    b_low.append(np.log(self.lower_alpha))
+                    b_low.append(np.log(self.lower_beta))
+                    b_up.append(np.log(self.upper_alpha))
+                    b_up.append(np.log(self.f_bmax[0]))
+                elif rate[2] == 'negative':
+                    b_low.append(np.log(self.lower_alpha))
+                    b_low.append(np.log(self.lower_beta))
+                    b_up.append(np.log(self.upper_alpha))
+                    b_up.append(np.log(self.r_bmax[0]))
+
+        if transform == 'loglog':
+            b_low.append(self.minf)
+            b_up.append(0.0)
+            
+        elif transform == 'loglinear':
+            b_low.append(0.0)
+            b_up.append(1.0)
+
+        return [np.array(b_low),np.array(b_up)]
+
+    def check_rates(self, rates_dict, parameters):
+
+        debug = True
         # Check parameter boundaries
         for names, rate in rates_dict.iteritems():
 
-            if rate[2] == True:
-
-                if rate[0] < self.lower_alpha:
-                    if debug: print('Lower')
+            if parameters[rate[0]] < self.lower_alpha:
+                    if debug: print('Lower_alpha')
                     return self.minf
 
-                if rate[1] > self.upper_alpha:
-                    if debug: print('Lower')
+            if parameters[rate[0]] > self.upper_alpha:
+                    if debug: print('Upper_alpha')
                     return self.minf
 
-                r = rate[0] * np.exp(rate[1] * self.vmax)
+            if rate[2] == 'vol_ind':
+                
+                r = parameters[rate[0]] 
                 if r < self.rmin or r > self.rmax:
-                    if debug: print(names)
-                    return self.minf
+                    if debug: print(names, 'vol_ind')
+                    return self.minf   
 
-            elif rate[2] == False:
+            elif rate[2] == 'positive':
+                if parameters[rate[1]] < self.lower_beta:
+                        if debug: print('Lower_beta_pos')
+                        return self.minf
 
-                if rate[0] < self.lower_beta:
-                    if debug: print('Lower')
-                    return self.minf
+                if parameters[rate[1]] > self.f_bmax[0]:
+                        if debug: print('Upper_beta_pos')
+                        return self.minf     
 
-                if rate[1] > self.upper_beta:
-                    if debug: print('Lower')
-                    return self.minf
-
-                r = rate[0] * np.exp(-rate[1] * self.vmin)
+                r = parameters[rate[0]] * np.exp(parameters[rate[1]] * self.vmax)
                 if r < self.rmin or r > self.rmax:
-                    if debug: print(names)
+                    if debug: print(names,'pos')
                     return self.minf
+
+            elif rate[2] == 'negative':
+                if parameters[rate[1]] < self.lower_beta:
+                        if debug: print('Lower_beta_neg')
+                        return self.minf
+
+                if parameters[rate[1]] > self.r_bmax[0]:
+                        if debug: print('Upper_beta_neg')
+                        return self.minf     
+                r = parameters[rate[0]] * np.exp(-parameters[rate[1]] * self.vmin)
+                if r < self.rmin or r > self.rmax:
+                    if debug: print(names,'neg')
+                    return self.minf
+
         return 0
 
-    def _sample_rates(self, v):
-        for i in xrange(100):
+    def _sample_rates(self, v, rate_type):
+        i = 0
+        while i == 0:
             a = np.exp(np.random.uniform(
                 np.log(self.lower_alpha), np.log(self.upper_alpha)))
-            b = np.random.uniform(self.lower_beta, self.upper_beta)
-            r = a * np.exp(b * v)
-            if r >= self.rmin and r <= self.rmax:
-                return a, b
+            
+            
+            if rate_type == 'positive' or rate_type == 'negative':
+                if rate_type == 'positive':
+                    b = np.random.uniform(self.lower_beta, self.f_bmax[0])
+                    r = a * np.exp(b * v)
+                elif rate_type == 'negative':
+                    b = np.random.uniform(self.lower_beta, self.r_bmax[0])
+                    r = a * np.exp(-b * v)
+                if r > self.rmin and r < self.rmax:
+                    i = 1
+                    return a, b
+                    
+            elif rate_type == 'vol_ind':
+                r = a
+                if r > self.rmin and r < self.rmax:
+                    i = 1
+                    return a
+            
         raise ValueError('Too many iterations')
 
     def _sample_partial(self, rates_dict):
 
-        p = np.zeros(2*len(rates_dict)+1)
-        i = 0
+        p = []#np.zeros(2*len(rates_dict)+1)
+       
         for _, rate in rates_dict.iteritems():
             # Sample forward rates
-            if rate[2] == True:
-                p[i], p[i+1] = self._sample_rates(self.vmax)
-                i += 2
+
+            if rate[2] == 'vol_ind':
+                p.append(self._sample_rates(self.vmax, rate[2]))
+            
+            elif rate[2] == 'positive':
+                a, b = self._sample_rates(self.vmax, rate[2])
+                p.append(a)
+                p.append(b)
+                
             # Sample backward rates
-            else:
-                p[i], p[i+1] = self._sample_rates(-self.vmin)
-                i += 2
+            elif rate[2] == 'negative':
+                a, b = self._sample_rates(self.vmin, rate[2])
+                p.append(a)
+                p.append(b)
+                
+                
         # Sample conductance
-        p[-1] = np.random.uniform(
-            self.lower_conductance, self.upper_conductance)
+        p.append( np.random.uniform(
+            self.lower_conductance, self.upper_conductance) )
+        p = np.asarray(p)
         print(p)
 
         # Return
