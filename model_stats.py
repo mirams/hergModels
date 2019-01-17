@@ -3,6 +3,10 @@
 # Fit Kylie's model to Cell 5 data using CMA-ES
 #
 from __future__ import division, print_function
+import models_forward.pintsForwardModel as forwardModel
+import models_forward.LogPrior as prior
+import models_forward.Rates as Rates
+import models_forward.util as util
 import os
 import sys
 import pints
@@ -80,6 +84,10 @@ def aic_bic(samples, current):
 
     return 2*npar - 2*max_log_likelihood, np.log(len(current))*npar - 2*max_log_likelihood
 
+def aic_bic_opt(max_log_likelihood, current):
+
+    return 2*npar - 2*max_log_likelihood, np.log(len(current))*npar - 2*max_log_likelihood
+
 def rmse(model, samples, current, time):
 
     new_values = []
@@ -88,6 +96,11 @@ def rmse(model, samples, current, time):
             new_values.append(ppc_sol)
     new_values = np.array(new_values)
     mean_values = np.mean(new_values, axis=0)
+    return np.sqrt(((current - mean_values) ** 2).mean())
+
+def rmse_opt(model, parameters, current, time):
+
+    mean_values = model.simulate(parameters, time)
     return np.sqrt(((current - mean_values) ** 2).mean())
     
 
@@ -114,8 +127,10 @@ parser.add_argument('--cell', type=int, default=5, metavar='N', \
       help='cell number : 1, 2, ..., 5' )
 parser.add_argument('--points', type=int, default=5000, metavar='N', \
       help='number of samples to compute WAIC')
+parser.add_argument('--mcmc', type=bool, default=False, metavar='N',
+                    help='get model stats for mcmc or optimisation')
 args = parser.parse_args()
-sys.path.append(os.path.abspath('models_forward'))
+#sys.path.append(os.path.abspath('models_forward'))
 
 cell = args.cell
 root = os.path.abspath('sine-wave-data')
@@ -145,77 +160,93 @@ del(log_ap)
 protocol_ap = [time_ap, voltage_ap]
 
 model_ppc_tarces = []
-ikr_names = ['Beattie', 'C-O-I','C-C-O-I','C-C-C-O-I']
-model_metrics = np.zeros((5,7))
-for i in xrange(5):
-
-    if i ==0:
-        import circularCOIIC as forwardModel
-        model_name ='model-1'
-        print("loading  C-O-I-IC model")
-        
-    elif i ==1:
-        import linearCOI as forwardModel
-        model_name ='model-2'
-        print("loading  C-O-I model")
-
-    elif i ==2:
-        import linearCCOI as forwardModel
-        print("loading  C-C-O-I model")
-        model_name ='model-3'
-
-    elif i ==3:
-        import linearCCCOI as forwardModel
-        print("loading  C-C-C-O-I model")
-        model_name ='model-4'
-    
-    elif i == 4:
-        import circularCCOIICIC as forwardModel
-        print("loading  C-C-O-I-IC-IC model")
-        model_name ='model-5'
-
+#ikr_names = ['Beattie', 'C-O-I','C-C-O-I','C-C-C-O-I']
+if args.mcmc:
+    model_metrics = np.zeros((30,7))
+else:
+    model_metrics = np.zeros((30,8))
+for i in xrange(30):
+    model_name = 'model-'+str(i+1)
+    root = os.path.abspath('models_myokit')
+    myo_model = os.path.join(root, model_name + '.mmt')
+    root = os.path.abspath('rate_dictionaries')
+    rate_file = os.path.join(root, model_name + '-priors.p')
+    rate_dict = cPickle.load(open(rate_file, 'rb'))
+    sys.path.append(os.path.abspath('models_forward'))
+    print("loading  model: "+str(i+1))
+    model_name = 'model-'+str(i+1)
     temperature = forwardModel.temperature(cell)
     lower_conductance = forwardModel.conductance_limit(cell)
+    print('Applying capacitance filtering')
     time, voltage, current = forwardModel.capacitance(
-        protocol_sine, 0.1, time_sine, voltage_sine, current_sine)
+    protocol_sine, 0.1, time_sine, voltage_sine, current_sine)
+    sigma_noise_sine = np.std(current_sine[:2000], ddof=1)
+    sigma_noise_ap = np.std(current_ap[:2000], ddof=1)
     #
     # Create forward model
     #
-    model = forwardModel.ForwardModel(protocol_sine, temperature, sine_wave=True, logTransform=False)
-
-    root = os.path.abspath('mcmc_results')
-    param_filename = os.path.join(root, model_name +'-cell-' + str(cell) + '-mcmc_traces.p')
-    trace = cPickle.load(open(param_filename, 'rb'))
-
-    npar = model.n_parameters()
-    burnin = 70000
-    points = burnin/args.points
-    samples_all_chains = trace[:, burnin:, :]
-    sample_chain_1 = samples_all_chains[0]
-    samples_waic =sample_chain_1[::10,:npar]
-    samples_rmse =sample_chain_1[::300,:npar]
-    
-    
-    sigma_noise_sine = np.std(current[:2000], ddof=1)
+    transform = 0
+    model = forwardModel.ForwardModel(
+        protocol_sine, temperature, myo_model, rate_dict, transform, sine_wave=True)
+    model_ap = forwardModel.ForwardModel(
+        protocol_ap, temperature, myo_model, rate_dict, transform, sine_wave=False)
+    npar = model.n_params
+    #
+    # Define problem
+    #
     problem_sine = pints.SingleOutputProblem(model, time_sine, current_sine)
-    #log_likelihood = pints.KnownNoiseLogLikelihood(problem, sigma_noise_sine)
-    log_prior = forwardModel.LogPrior(lower_conductance, logTransform=False)
-    #log_posterior = pints.LogPosterior(log_likelihood, log_prior)
-     
-    waic_train = waic(problem_sine, samples_waic, current_sine, sigma_noise_sine)[0]
-    aic_ppc, bic_ppc =aic_bic(sample_chain_1, current_sine)
-    log_Z = norm_const(sample_chain_1)
-    rmse_sine = rmse(model, samples_rmse, current_sine, time_sine)
-    #print(aic_ppc)
-
-    model_ap = forwardModel.ForwardModel(protocol_ap, temperature, sine_wave=False, logTransform=False)
-    sigma_noise_ap = np.std(current[:2000], ddof=1)
     problem_ap = pints.SingleOutputProblem(model_ap, time_ap, current_ap)
-    waic_test = waic(problem_ap, samples_waic, current_ap, sigma_noise_ap)[0]
-    rmse_ap = rmse(model_ap, samples_rmse, current_ap, time_ap)
-    #print(bic_ppc)
-    model_metrics[i,:] = [ waic_train, aic_ppc, bic_ppc, log_Z, rmse_sine, waic_test, rmse_ap]
+    #
+    # Define log-posterior
+    #
+    log_likelihood = pints.KnownNoiseLogLikelihood(problem_sine, sigma_noise_sine)
+    log_likelihood_ap = pints.KnownNoiseLogLikelihood(problem_ap, sigma_noise_ap)
+    log_prior = prior.LogPrior(
+        rate_dict, lower_conductance, npar, transform)
+    log_posterior = pints.LogPosterior(log_likelihood, log_prior)
+    log_posterior_ap = pints.LogPosterior(log_likelihood_ap, log_prior)
+    rate_checker = Rates.ratesPrior(transform, lower_conductance)
+
+    
+    if args.mcmc:
+        model_metrics = np.zeros((5,7))
+        root = os.path.abspath('mcmc_results')
+        param_filename = os.path.join(root, model_name +'-cell-' + str(cell) + '-mcmc_traces.p')
+        trace = cPickle.load(open(param_filename, 'rb'))
+
+        
+        burnin = 70000
+        points = burnin/args.points
+        samples_all_chains = trace[:, burnin:, :]
+        sample_chain_1 = samples_all_chains[0]
+        samples_waic =sample_chain_1[::10,:npar]
+        samples_rmse =sample_chain_1[::300,:npar]
+
+        
+        waic_train = waic(problem_sine, samples_waic, current_sine, sigma_noise_sine)[0]
+        aic_ppc, bic_ppc =aic_bic(sample_chain_1, current_sine)
+        log_Z = norm_const(sample_chain_1)
+        rmse_sine = rmse(model, samples_rmse, current_sine, time_sine)
+        #print(aic_ppc)
+        
+        waic_test = waic(problem_ap, samples_waic, current_ap, sigma_noise_ap)[0]
+        rmse_ap = rmse(model_ap, samples_rmse, current_ap, time_ap)
+        #print(bic_ppc)
+        model_metrics[i,:] = [ waic_train, aic_ppc, bic_ppc, log_Z, rmse_sine, waic_test, rmse_ap]
+    else:
+        
+        print(model_name+': stats written')
+        parameters = forwardModel.fetch_parameters(model_name, cell)
+        max_log_likelihood_train = log_likelihood(parameters)
+        max_log_likelihood_ap = log_likelihood_ap(parameters)
+        rmse_opt_train = rmse_opt(model, parameters, current_sine, time_sine)
+        aic_opt_train, bic_opt_train =aic_bic_opt(max_log_likelihood_train, parameters)
+        rmse_opt_ap = rmse_opt(model_ap, parameters, current_ap, time_ap)
+        aic_opt_ap, bic_opt_ap =aic_bic_opt(max_log_likelihood_ap, parameters)
+        model_metrics[i,:] = [ max_log_likelihood_train, aic_opt_train, bic_opt_train, rmse_opt_train, 
+                               max_log_likelihood_ap, aic_opt_ap, bic_opt_ap, rmse_opt_ap]
+    
 
 outfile = './figures/model_metrics.txt'
-np.savetxt(outfile, model_metrics)
+np.savetxt(outfile, model_metrics,  fmt='%4.4e', delimiter=',')
     
